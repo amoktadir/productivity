@@ -1,4 +1,3 @@
-
 # ============================================================
 # Streamlit App: Work Study + Automatic Line Balancing
 # Based on Moktadir et al. (2017) productivity improvement logic
@@ -12,11 +11,11 @@ from typing import List, Dict, Tuple
 import numpy as np
 import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt
 
 try:
     import plotly.express as px
     import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
     PLOTLY_AVAILABLE = True
 except Exception:
     PLOTLY_AVAILABLE = False
@@ -26,24 +25,26 @@ except Exception:
 # Page setup
 # ------------------------------------------------------------
 st.set_page_config(
-    page_title="Work Study & Line Balancing App",
+    page_title="Work Study & Line Balancing",
     page_icon="⚙️",
     layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 st.markdown(
     """
     <style>
-    .main {background-color: #fbfbfd;}
+    .main {background-color: #f8f9fa;}
     div[data-testid="metric-container"] {
         background-color: #ffffff;
-        border: 1px solid #ececf1;
-        padding: 16px;
-        border-radius: 14px;
-        box-shadow: 0 1px 6px rgba(0,0,0,0.05);
+        border: 1px solid #e3e6f0;
+        padding: 20px;
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        border-left: 5px solid #4e73df;
     }
-    .block-container {padding-top: 1.5rem;}
-    h1, h2, h3 {letter-spacing: -0.02em;}
+    .block-container {padding-top: 2rem;}
+    h1, h2, h3 {color: #2c3e50; font-weight: 700; letter-spacing: -0.5px;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -63,14 +64,9 @@ def compute_work_study(
     relaxation_allowance: float = 15,
     contingency_allowance: float = 3,
     working_minutes_per_day: float = 480,
-    rounding: int = 0,
+    rounding: int = 2,
 ) -> pd.DataFrame:
-    """
-    Calculates selected time, basic time, standard time and capacity.
-    Time unit follows the paper: centiminutes by default.
-    480 minutes/day = 48000 centiminutes/day.
-    """
-
+    """Calculates selected, basic, standard time and capacity."""
     out = df.copy()
 
     required_cols = ["operation"]
@@ -78,7 +74,6 @@ def compute_work_study(
         if c not in out.columns:
             raise ValueError(f"Missing required column: {c}")
 
-    # Auto-detect observed time columns
     observed_cols = [c for c in out.columns if str(c).lower().startswith("obs")]
     if "selected_time" not in out.columns:
         if observed_cols:
@@ -96,7 +91,6 @@ def compute_work_study(
     out["basic_time"] = out["selected_time"] * (out["rating"] / standard_rating)
     out["standard_time"] = out["basic_time"] * allowance_factor
 
-    # Available time in centiminutes because input time is centiminutes
     available_centimin = working_minutes_per_day * 100
     out["capacity_day_100"] = (available_centimin * out["manpower"]) / out["standard_time"].replace(0, np.nan)
     out["capacity_day_85"] = out["capacity_day_100"] * 0.85
@@ -122,7 +116,9 @@ def production_summary(
     available_centimin_total = total_manpower * working_minutes_per_day * 100
     standard_output_100 = available_centimin_total / total_standard_time if total_standard_time > 0 else np.nan
     productivity_per_worker = actual_output_per_day / total_manpower if total_manpower > 0 else np.nan
-    efficiency = actual_output_per_day / standard_output_100 * 100 if standard_output_100 and standard_output_100 > 0 else np.nan
+    
+    # Pure decimal calculation (no explicit scaling factor)
+    efficiency = actual_output_per_day / standard_output_100 if standard_output_100 and standard_output_100 > 0 else np.nan
     work_content_minutes = total_standard_time / 100
 
     return {
@@ -132,7 +128,7 @@ def production_summary(
         "standard_output_100": standard_output_100,
         "actual_output_per_day": actual_output_per_day,
         "productivity_piece_worker_day": productivity_per_worker,
-        "line_efficiency_percent": efficiency,
+        "line_efficiency": efficiency,
     }
 
 
@@ -142,18 +138,18 @@ def compare_existing_proposed(existing_summary: Dict[str, float], proposed_summa
     existing_std_out = existing_summary["standard_output_100"]
     proposed_std_out = proposed_summary["standard_output_100"]
 
-    work_content_reduction = ((existing_wc - proposed_wc) / existing_wc) * 100 if existing_wc > 0 else np.nan
-    productivity_improvement = ((proposed_std_out - existing_std_out) / existing_std_out) * 100 if existing_std_out > 0 else np.nan
+    # Pure decimal calculations (no explicit scaling factor)
+    work_content_reduction = ((existing_wc - proposed_wc) / existing_wc) if existing_wc > 0 else np.nan
+    productivity_improvement = ((proposed_std_out - existing_std_out) / existing_std_out) if existing_std_out > 0 else np.nan
     efficiency_improvement = (
-        (proposed_summary["line_efficiency_percent"] - existing_summary["line_efficiency_percent"])
-        / existing_summary["line_efficiency_percent"] * 100
-        if existing_summary["line_efficiency_percent"] > 0 else np.nan
+        (proposed_summary["line_efficiency"] - existing_summary["line_efficiency"]) / existing_summary["line_efficiency"]
+        if existing_summary["line_efficiency"] > 0 else np.nan
     )
 
     return {
-        "work_content_reduction_percent": work_content_reduction,
-        "productivity_improvement_percent": productivity_improvement,
-        "efficiency_improvement_percent": efficiency_improvement,
+        "work_content_reduction": work_content_reduction,
+        "productivity_improvement": productivity_improvement,
+        "efficiency_improvement": efficiency_improvement,
     }
 
 
@@ -163,13 +159,6 @@ def sequential_line_balance(
     time_col: str = "standard_time",
     order_col: str = "sl_no",
 ) -> pd.DataFrame:
-    """
-    Simple automatic line balancing for sequential assembly operations.
-    It groups consecutive operations into workstations without exceeding cycle time
-    where possible. If a single task exceeds cycle time, it becomes one station
-    and is flagged as bottleneck.
-    """
-
     work = df.copy()
     if order_col in work.columns:
         work = work.sort_values(order_col)
@@ -184,9 +173,6 @@ def sequential_line_balance(
 
     for _, row in work.iterrows():
         t = float(row[time_col])
-        op_name = row["operation"]
-
-        # If task alone exceeds cycle time, assign to a separate station
         if t > cycle_time:
             if current_ops:
                 for op_idx in current_ops:
@@ -199,7 +185,6 @@ def sequential_line_balance(
             current_station += 1
             continue
 
-        # Fit into current station
         if current_time + t <= cycle_time or not current_ops:
             stations.append(current_station)
             current_ops.append(len(stations) - 1)
@@ -214,7 +199,9 @@ def sequential_line_balance(
     station_time = work.groupby("auto_station")[time_col].transform("sum")
     work["station_time"] = station_time
     work["balance_loss_centimin"] = cycle_time - work["station_time"]
-    work["station_utilization_percent"] = (work["station_time"] / cycle_time) * 100
+    
+    # Pure decimal utilization (no scaling factor)
+    work["station_utilization"] = (work["station_time"] / cycle_time)
     work["bottleneck_flag"] = work[time_col] > cycle_time
 
     return work
@@ -232,7 +219,8 @@ def station_summary(balanced_df: pd.DataFrame, cycle_time: float) -> pd.DataFram
         .reset_index()
     )
     s["idle_time"] = cycle_time - s["station_time"]
-    s["utilization_percent"] = (s["station_time"] / cycle_time) * 100
+    # Pure decimal utilization
+    s["utilization"] = (s["station_time"] / cycle_time)
     return s
 
 
@@ -248,32 +236,8 @@ def make_download_excel(existing_df, proposed_df, balanced_df, station_df, summa
     return output
 
 
-def plot_bar(df, x, y, title, horizontal=False):
-    if PLOTLY_AVAILABLE:
-        if horizontal:
-            fig = px.bar(df, x=y, y=x, orientation="h", title=title, text=y)
-            fig.update_layout(height=max(450, 18 * len(df)), yaxis={"categoryorder": "total ascending"})
-        else:
-            fig = px.bar(df, x=x, y=y, title=title, text=y)
-        fig.update_traces(texttemplate="%{text:.0f}", textposition="outside")
-        fig.update_layout(margin=dict(l=10, r=10, t=50, b=10))
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        fig, ax = plt.subplots(figsize=(10, max(5, len(df) * 0.25 if horizontal else 5)))
-        if horizontal:
-            ax.barh(df[x], df[y])
-            ax.set_xlabel(y)
-        else:
-            ax.bar(df[x], df[y])
-            ax.set_ylabel(y)
-            plt.xticks(rotation=45, ha="right")
-        ax.set_title(title)
-        st.pyplot(fig)
-
-
 # ------------------------------------------------------------
-# Demo data, shortened from the paper structure
-# Users can replace this by uploading complete CSV/Excel data.
+# Demo Data Injection
 # ------------------------------------------------------------
 def demo_existing_data():
     data = [
@@ -283,295 +247,199 @@ def demo_existing_data():
         [4, "Splitting leather", 33, 37, 34, 29, 35, 80, "M/c", 1],
         [5, "Skiving leather, rabus and PVC", 240, 250, 235, 246, 238, 85, "M/c", 3],
         [6, "Sewing back part face to face", 40, 37, 32, 42, 35, 80, "M/c", 1],
-        [7, "Double way tape attaching to back joining and hammering", 105, 110, 100, 120, 118, 85, "Manual", 2],
+        [7, "Tape attaching and hammering", 105, 110, 100, 120, 118, 85, "Manual", 2],
         [8, "Double stitching to back part", 22, 23, 27, 19, 25, 80, "M/c", 1],
-        [9, "Gluing on back leather and foam and top folding", 230, 221, 225, 235, 218, 80, "Manual", 2],
-        [10, "Gluing on back trim part and folding", 208, 230, 220, 227, 223, 80, "Manual", 2],
-        [15, "Gluing on front leather and folding", 259, 275, 250, 265, 269, 85, "Manual", 4],
-        [21, "Front and inner trimming sewing 2.5 mm", 89, 93, 97, 85, 95, 80, "M/c", 1],
-        [23, "Gluing on back inner trim and folding", 167, 156, 163, 160, 159, 80, "Manual", 1],
-        [28, "Gluing on gusset and EVA and top folding", 211, 201, 209, 200, 204, 75, "Manual", 2],
-        [38, "Piping stitching with front and back parts", 320, 322, 329, 334, 337, 75, "M/c", 1],
-        [47, "Gusset stitching with front and back part", 425, 437, 439, 420, 423, 80, "M/c", 1],
-        [57, "Thread burning, cleaning and polishing", 389, 361, 379, 357, 385, 80, "Manual", 3],
-        [60, "Price tag attaching and packaging", 233, 227, 220, 229, 240, 80, "Manual", 1],
+        [9, "Gluing on back leather and folding", 230, 221, 225, 235, 218, 80, "Manual", 2],
+        [10, "Gluing on back trim part and folding", 208, 230, 220, 227, 223, 80, "Manual", 2]
     ]
-    return pd.DataFrame(
-        data,
-        columns=["sl_no", "operation", "obs1", "obs2", "obs3", "obs4", "obs5", "rating", "machine_or_manual", "manpower"],
-    )
+    return pd.DataFrame(data, columns=["sl_no", "operation", "obs1", "obs2", "obs3", "obs4", "obs5", "rating", "machine_or_manual", "manpower"])
 
 
 def default_proposed_from_existing(existing_df):
     proposed = existing_df.copy()
-
-    # Example improvement rules based on Table 3 logic:
-    # remove inspection, reduce adhesive/gluing tasks, reduce CNC-applicable sewing tasks, reduce staffing.
     reduction_rules = {
         "Inspection and numbering": 0.00,
-        "Gluing on back leather and foam and top folding": 0.80,
+        "Gluing on back leather and folding": 0.80,
         "Gluing on back trim part and folding": 0.85,
-        "Gluing on front leather and folding": 0.80,
-        "Front and inner trimming sewing 2.5 mm": 0.50,
-        "Gluing on back inner trim and folding": 0.75,
-        "Gluing on gusset and EVA and top folding": 0.83,
     }
-
     for op, factor in reduction_rules.items():
         mask = proposed["operation"].str.lower() == op.lower()
         obs_cols = [c for c in proposed.columns if c.startswith("obs")]
         proposed.loc[mask, obs_cols] = proposed.loc[mask, obs_cols] * factor
 
     proposed["proposal_note"] = ""
-    proposed.loc[proposed["operation"].str.contains("Gluing", case=False, na=False), "proposal_note"] = (
-        "Suggested spraying/water-based adhesive method to reduce application time."
-    )
-    proposed.loc[proposed["operation"].str.contains("Inspection", case=False, na=False), "proposal_note"] = (
-        "Avoid or transfer inspection/numbering from the selected line where feasible."
-    )
-    proposed.loc[proposed["operation"].str.contains("sewing 2.5", case=False, na=False), "proposal_note"] = (
-        "CNC or fixture-assisted stitching for curved/small components."
-    )
+    proposed.loc[proposed["operation"].str.contains("Gluing", case=False, na=False), "proposal_note"] = "Use spray adhesive"
     return proposed
 
 
-def load_uploaded(file):
-    if file.name.lower().endswith(".csv"):
-        return pd.read_csv(file)
-    return pd.read_excel(file)
-
-
 def template_dataframe():
-    return pd.DataFrame(
-        {
-            "sl_no": [1, 2, 3],
-            "operation": ["Operation A", "Operation B", "Operation C"],
-            "obs1": [120, 90, 150],
-            "obs2": [118, 92, 148],
-            "obs3": [122, 91, 152],
-            "obs4": [121, 89, 151],
-            "obs5": [119, 90, 149],
-            "rating": [80, 85, 100],
-            "machine_or_manual": ["Manual", "M/c", "Manual"],
-            "manpower": [1, 1, 2],
-        }
-    )
+    return pd.DataFrame({
+        "sl_no": [1, 2],
+        "operation": ["Operation A", "Operation B"],
+        "obs1": [120, 90], "obs2": [118, 92], "obs3": [122, 91],
+        "obs4": [121, 89], "obs5": [119, 90],
+        "rating": [80, 85], "machine_or_manual": ["Manual", "M/c"], "manpower": [1, 1],
+    })
 
 
 # ------------------------------------------------------------
-# Sidebar
+# Sidebar setup
 # ------------------------------------------------------------
-st.sidebar.title("⚙️ Settings")
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/2043/2043064.png", width=60)
+    st.title("Line Configuration")
+    
+    with st.expander("⏱️ Time Allowances", expanded=True):
+        standard_rating = st.number_input("Standard Rating", min_value=1.0, value=100.0, step=1.0)
+        relaxation_allowance = st.number_input("Relaxation Allowance (%)", min_value=0.0, value=15.0, step=0.5)
+        contingency_allowance = st.number_input("Contingency Allowance (%)", min_value=0.0, value=3.0, step=0.5)
+        working_minutes_per_day = st.number_input("Working Mins/Day", min_value=1.0, value=480.0, step=15.0)
+        
+    with st.expander("📊 Output Metrics", expanded=True):
+        actual_output_existing = st.number_input("Actual Existing Output/Day", min_value=0.0, value=240.0, step=1.0)
+        actual_output_proposed = st.number_input("Actual Proposed Output/Day", min_value=0.0, value=240.0, step=1.0)
 
-standard_rating = st.sidebar.number_input("Standard rating", min_value=1.0, value=100.0, step=1.0)
-relaxation_allowance = st.sidebar.number_input("Relaxation allowance (%)", min_value=0.0, value=15.0, step=0.5)
-contingency_allowance = st.sidebar.number_input("Contingency allowance (%)", min_value=0.0, value=3.0, step=0.5)
-working_minutes_per_day = st.sidebar.number_input("Working time per day (minutes)", min_value=1.0, value=480.0, step=15.0)
-actual_output_existing = st.sidebar.number_input("Actual existing output/day", min_value=0.0, value=240.0, step=1.0)
-actual_output_proposed = st.sidebar.number_input("Actual proposed output/day", min_value=0.0, value=240.0, step=1.0)
+    st.markdown("---")
+    balance_mode = st.selectbox("Line Balancing Target", ["Takt Time (Demand Based)", "Manual Cycle Time"])
+    if balance_mode == "Takt Time (Demand Based)":
+        demand_per_day = st.number_input("Required Demand/Day", min_value=1.0, value=240.0, step=1.0)
+        cycle_time = (working_minutes_per_day * 100) / demand_per_day
+    else:
+        cycle_time = st.number_input("Cycle Time (centiminutes)", min_value=1.0, value=500.0, step=10.0)
 
-st.sidebar.markdown("---")
-balance_mode = st.sidebar.selectbox("Line balancing target", ["Takt/cycle time from demand", "Manual cycle time"])
-if balance_mode == "Takt/cycle time from demand":
-    demand_per_day = st.sidebar.number_input("Required demand/day", min_value=1.0, value=240.0, step=1.0)
-    cycle_time = (working_minutes_per_day * 100) / demand_per_day
-else:
-    cycle_time = st.sidebar.number_input("Cycle time (centiminutes)", min_value=1.0, value=500.0, step=10.0)
-
-st.sidebar.info(f"Current cycle time: **{cycle_time:.2f} centiminutes** ({cycle_time/100:.2f} min)")
-
-
-# ------------------------------------------------------------
-# Header
-# ------------------------------------------------------------
-st.title("⚙️ Work Study, Productivity Analysis & Automatic Line Balancing")
-st.caption(
-    "Upload operation-time data, calculate basic/standard time, identify bottlenecks, and automatically group operations into balanced stations."
-)
-
-with st.expander("Required input format"):
-    st.write(
-        """
-        Upload CSV or Excel with at least:
-        **operation**, **rating**, **manpower**, and either **selected_time** or observed-time columns named **obs1, obs2, obs3...**.
-        Optional columns: **sl_no**, **machine_or_manual**, **proposal_note**.
-        Time unit should be **centiminutes** to match the paper-style calculation.
-        """
-    )
-    st.dataframe(template_dataframe(), use_container_width=True)
-    st.download_button(
-        "Download input template CSV",
-        data=template_dataframe().to_csv(index=False).encode("utf-8"),
-        file_name="work_study_input_template.csv",
-        mime="text/csv",
-    )
+    st.success(f"**Target Cycle Time:**\n{cycle_time:.2f} cMin ({cycle_time/100:.2f} mins)")
 
 
 # ------------------------------------------------------------
-# Data input
+# Main Dashboard UI
 # ------------------------------------------------------------
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["1) Data & Time Study", "2) Productivity Comparison", "3) Automatic Line Balancing", "4) Downloads"]
-)
+st.title("Industrial Work Study & Productivity Dashboard")
+st.caption("Advanced interactive toolkit for time study, line efficiency tracking, and automated bottleneck stratification.")
+
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📥 Data Input & Study", 
+    "📈 Productivity Diagnostics", 
+    "⚖️ Auto Line Balancing", 
+    "💾 Export Options"
+])
 
 with tab1:
-    st.subheader("Data input")
+    col_up1, col_up2 = st.columns(2)
+    with col_up1:
+        uploaded_existing = st.file_uploader("Upload Existing Line (CSV/Excel)", type=["csv", "xlsx"])
+    with col_up2:
+        uploaded_proposed = st.file_uploader("Upload Proposed Line (CSV/Excel)", type=["csv", "xlsx"])
 
-    uploaded_existing = st.file_uploader("Upload existing-line CSV/Excel", type=["csv", "xlsx"], key="existing")
-    uploaded_proposed = st.file_uploader("Upload proposed-line CSV/Excel (optional)", type=["csv", "xlsx"], key="proposed")
+    existing_raw = pd.read_csv(uploaded_existing) if uploaded_existing else demo_existing_data()
+    proposed_raw = pd.read_csv(uploaded_proposed) if uploaded_proposed else default_proposed_from_existing(existing_raw)
 
-    if uploaded_existing:
-        existing_raw = load_uploaded(uploaded_existing)
-    else:
-        existing_raw = demo_existing_data()
-        st.info("Using built-in demo data. Upload your full 60-operation table for the real analysis.")
+    st.markdown("#### 1. Edit Source Data")
+    existing_raw = st.data_editor(existing_raw, use_container_width=True, num_rows="dynamic")
+    
+    # Background calculations
+    existing_calc = compute_work_study(existing_raw, standard_rating, relaxation_allowance, contingency_allowance, working_minutes_per_day)
+    proposed_calc = compute_work_study(proposed_raw, standard_rating, relaxation_allowance, contingency_allowance, working_minutes_per_day)
 
-    if uploaded_proposed:
-        proposed_raw = load_uploaded(uploaded_proposed)
-    else:
-        proposed_raw = default_proposed_from_existing(existing_raw)
-
-    st.markdown("#### Existing line data")
-    existing_raw = st.data_editor(existing_raw, use_container_width=True, num_rows="dynamic", key="edit_existing")
-
-    st.markdown("#### Proposed line data")
-    proposed_raw = st.data_editor(proposed_raw, use_container_width=True, num_rows="dynamic", key="edit_proposed")
-
-    existing_calc = compute_work_study(
-        existing_raw,
-        standard_rating=standard_rating,
-        relaxation_allowance=relaxation_allowance,
-        contingency_allowance=contingency_allowance,
-        working_minutes_per_day=working_minutes_per_day,
-        rounding=0,
-    )
-    proposed_calc = compute_work_study(
-        proposed_raw,
-        standard_rating=standard_rating,
-        relaxation_allowance=relaxation_allowance,
-        contingency_allowance=contingency_allowance,
-        working_minutes_per_day=working_minutes_per_day,
-        rounding=0,
-    )
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("#### Existing line calculated table")
-        st.dataframe(existing_calc, use_container_width=True)
-    with c2:
-        st.markdown("#### Proposed line calculated table")
-        st.dataframe(proposed_calc, use_container_width=True)
-
-    st.markdown("#### Bottleneck view")
-    bottleneck_n = st.slider("Show top N bottlenecks", 5, min(30, len(existing_calc)), 10)
-    bottleneck_df = existing_calc.sort_values("standard_time", ascending=False).head(bottleneck_n)
-    plot_bar(bottleneck_df, "operation", "standard_time", "Top bottleneck operations by standard time", horizontal=True)
+    st.markdown("#### 2. Bottleneck Stratification")
+    if PLOTLY_AVAILABLE:
+        bottleneck_df = existing_calc.sort_values("standard_time", ascending=True).tail(15)
+        fig = px.bar(
+            bottleneck_df, x="standard_time", y="operation", 
+            color="machine_or_manual", orientation="h",
+            title="Operation Time Distribution (Top 15 Bottlenecks)",
+            color_discrete_sequence=px.colors.qualitative.Pastel,
+            text_auto='.0f'
+        )
+        fig.update_layout(template="plotly_white", yaxis_title="", xaxis_title="Standard Time (cMin)", height=500)
+        st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
-    st.subheader("Productivity and work-content comparison")
-
     existing_summary = production_summary(existing_calc, actual_output_existing, working_minutes_per_day)
     proposed_summary = production_summary(proposed_calc, actual_output_proposed, working_minutes_per_day)
     comparison = compare_existing_proposed(existing_summary, proposed_summary)
 
+    st.markdown("### Executive Summary")
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Existing work content", f"{existing_summary['work_content_minutes_per_piece']:.2f} min/piece")
-    m2.metric("Proposed work content", f"{proposed_summary['work_content_minutes_per_piece']:.2f} min/piece")
-    m3.metric("Work-content reduction", f"{comparison['work_content_reduction_percent']:.2f}%")
-    m4.metric("Productivity improvement", f"{comparison['productivity_improvement_percent']:.2f}%")
+    m1.metric("Work Content Reduction", f"{comparison['work_content_reduction']:.2%}")
+    m2.metric("Productivity Improvement", f"{comparison['productivity_improvement']:.2%}")
+    m3.metric("Existing Efficiency", f"{existing_summary['line_efficiency']:.2%}")
+    m4.metric("Proposed Efficiency", f"{proposed_summary['line_efficiency']:.2%}", delta=f"{comparison['efficiency_improvement']:.2%}")
 
-    m5, m6, m7, m8 = st.columns(4)
-    m5.metric("Existing standard output", f"{existing_summary['standard_output_100']:.0f} pcs/day")
-    m6.metric("Proposed standard output", f"{proposed_summary['standard_output_100']:.0f} pcs/day")
-    m7.metric("Existing line efficiency", f"{existing_summary['line_efficiency_percent']:.2f}%")
-    m8.metric("Proposed line efficiency", f"{proposed_summary['line_efficiency_percent']:.2f}%")
+    st.markdown("---")
+    c1, c2 = st.columns(2)
+    
+    with c1:
+        # Standard Output Comparison
+        if PLOTLY_AVAILABLE:
+            fig1 = go.Figure()
+            fig1.add_trace(go.Bar(x=["Existing", "Proposed"], y=[existing_summary['standard_output_100'], proposed_summary['standard_output_100']], 
+                                  name="Output (pcs/day)", marker_color="#4e73df", texttemplate="%{y:.0f}", textposition="outside"))
+            fig1.update_layout(title="Standard Output Capacity", template="plotly_white", yaxis_title="Pieces per day")
+            st.plotly_chart(fig1, use_container_width=True)
 
-    summary_df = pd.DataFrame(
-        [
-            {"Scenario": "Existing", **existing_summary},
-            {"Scenario": "Proposed", **proposed_summary},
-        ]
-    )
-
-    st.markdown("#### Summary table")
-    st.dataframe(summary_df, use_container_width=True)
-
-    chart_df = pd.DataFrame(
-        {
-            "Metric": ["Work content (min/piece)", "Standard output (pcs/day)", "Line efficiency (%)"],
-            "Existing": [
-                existing_summary["work_content_minutes_per_piece"],
-                existing_summary["standard_output_100"],
-                existing_summary["line_efficiency_percent"],
-            ],
-            "Proposed": [
-                proposed_summary["work_content_minutes_per_piece"],
-                proposed_summary["standard_output_100"],
-                proposed_summary["line_efficiency_percent"],
-            ],
-        }
-    ).melt(id_vars="Metric", var_name="Scenario", value_name="Value")
-
-    if PLOTLY_AVAILABLE:
-        fig = px.bar(chart_df, x="Metric", y="Value", color="Scenario", barmode="group", text="Value")
-        fig.update_traces(texttemplate="%{text:.2f}", textposition="outside")
-        fig.update_layout(title="Existing vs Proposed Performance", margin=dict(l=10, r=10, t=50, b=10))
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.dataframe(chart_df, use_container_width=True)
+    with c2:
+        # Work Content Comparison
+        if PLOTLY_AVAILABLE:
+            fig2 = go.Figure()
+            fig2.add_trace(go.Bar(x=["Existing", "Proposed"], y=[existing_summary['work_content_minutes_per_piece'], proposed_summary['work_content_minutes_per_piece']], 
+                                  name="Work Content", marker_color="#1cc88a", texttemplate="%{y:.2f}", textposition="outside"))
+            fig2.update_layout(title="Total Work Content", template="plotly_white", yaxis_title="Minutes per piece")
+            st.plotly_chart(fig2, use_container_width=True)
 
 with tab3:
-    st.subheader("Automatic line balancing")
-
-    line_for_balance = st.radio("Use which line for balancing?", ["Proposed line", "Existing line"], horizontal=True)
-    balance_source = proposed_calc if line_for_balance == "Proposed line" else existing_calc
-
+    col_radio, _ = st.columns([1, 2])
+    with col_radio:
+        line_for_balance = st.radio("Active Balancing Source:", ["Proposed Line", "Existing Line"], horizontal=True)
+    
+    balance_source = proposed_calc if line_for_balance == "Proposed Line" else existing_calc
     balanced_df = sequential_line_balance(balance_source, cycle_time=cycle_time)
     station_df = station_summary(balanced_df, cycle_time=cycle_time)
 
+    st.markdown("### Station Configuration Results")
     s1, s2, s3, s4 = st.columns(4)
-    s1.metric("No. of auto stations", f"{station_df['auto_station'].nunique()}")
-    s2.metric("Max station time", f"{station_df['station_time'].max():.0f} centimin")
-    s3.metric("Avg station utilization", f"{station_df['utilization_percent'].mean():.2f}%")
-    s4.metric("Balancing efficiency", f"{station_df['station_time'].sum()/(len(station_df)*cycle_time)*100:.2f}%")
-
-    st.markdown("#### Auto-balanced operation assignment")
-    st.dataframe(balanced_df, use_container_width=True)
-
-    st.markdown("#### Station summary")
-    st.dataframe(station_df, use_container_width=True)
+    s1.metric("Required Stations", f"{station_df['auto_station'].nunique()}")
+    s2.metric("Peak Station Load", f"{station_df['station_time'].max():.0f} cMin")
+    s3.metric("Average Station Utilization", f"{station_df['utilization'].mean():.2%}")
+    s4.metric("System Balancing Efficiency", f"{station_df['station_time'].sum()/(len(station_df)*cycle_time):.2%}")
 
     if PLOTLY_AVAILABLE:
-        fig = px.bar(
-            station_df,
-            x="auto_station",
-            y="station_time",
-            text="station_time",
-            title="Station load after automatic line balancing",
+        fig_bal = px.bar(
+            station_df, x="auto_station", y="station_time",
+            title="Station Workload vs Target Cycle Time",
+            text="station_time", color="utilization",
+            color_continuous_scale="Viridis"
         )
-        fig.add_hline(y=cycle_time, line_dash="dash", annotation_text="Cycle time")
-        fig.update_traces(texttemplate="%{text:.0f}", textposition="outside")
-        fig.update_layout(xaxis_title="Station", yaxis_title="Station time (centiminutes)")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        plot_bar(station_df, "auto_station", "station_time", "Station load after automatic line balancing")
+        fig_bal.add_hline(y=cycle_time, line_dash="dash", line_color="red", annotation_text="Cycle Time Barrier")
+        fig_bal.update_traces(texttemplate="%{text:.0f}", textposition="outside")
+        fig_bal.update_layout(template="plotly_white", xaxis_title="Station ID", yaxis_title="Allocated Time (cMin)")
+        st.plotly_chart(fig_bal, use_container_width=True)
 
-    overload = station_df[station_df["station_time"] > cycle_time]
-    if not overload.empty:
-        st.warning(
-            "Some stations exceed cycle time. Consider adding manpower, splitting tasks, method improvement, or increasing cycle time."
-        )
-        st.dataframe(overload, use_container_width=True)
+    st.markdown("#### Station Utilization Breakdown")
+    # Using st.column_config for a professional, interactive UI table
+    st.dataframe(
+        station_df[['auto_station', 'operations', 'station_time', 'utilization', 'has_bottleneck']], 
+        use_container_width=True,
+        column_config={
+            "auto_station": st.column_config.NumberColumn("Station ID"),
+            "operations": "Assigned Operations",
+            "station_time": st.column_config.NumberColumn("Time (cMin)", format="%.1f"),
+            "utilization": st.column_config.ProgressColumn(
+                "Utilization %",
+                help="Percentage of cycle time used",
+                format="%.2f",
+                min_value=0.0,
+                max_value=1.0,
+            ),
+            "has_bottleneck": st.column_config.CheckboxColumn("Bottleneck Warning")
+        }
+    )
 
 with tab4:
-    st.subheader("Export results")
-
-    balanced_df = sequential_line_balance(proposed_calc, cycle_time=cycle_time)
-    station_df = station_summary(balanced_df, cycle_time=cycle_time)
-
-    existing_summary = production_summary(existing_calc, actual_output_existing, working_minutes_per_day)
-    proposed_summary = production_summary(proposed_calc, actual_output_proposed, working_minutes_per_day)
-    comparison = compare_existing_proposed(existing_summary, proposed_summary)
+    st.markdown("### Data Export & Archiving")
+    st.info("Download the mathematically synchronized data arrays for your final publication or secondary processing pipelines.")
+    
+    balanced_export = sequential_line_balance(proposed_calc, cycle_time=cycle_time)
+    station_export = station_summary(balanced_export, cycle_time=cycle_time)
 
     all_summary = {
         **{f"existing_{k}": v for k, v in existing_summary.items()},
@@ -580,31 +448,9 @@ with tab4:
         "cycle_time_centimin": cycle_time,
     }
 
-    excel_file = make_download_excel(existing_calc, proposed_calc, balanced_df, station_df, all_summary)
+    excel_file = make_download_excel(existing_calc, proposed_calc, balanced_export, station_export, all_summary)
 
-    st.download_button(
-        "Download full Excel report",
-        data=excel_file,
-        file_name="work_study_line_balancing_results.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-    st.download_button(
-        "Download calculated proposed line CSV",
-        data=proposed_calc.to_csv(index=False).encode("utf-8"),
-        file_name="proposed_line_calculated.csv",
-        mime="text/csv",
-    )
-
-    st.download_button(
-        "Download auto-balanced line CSV",
-        data=balanced_df.to_csv(index=False).encode("utf-8"),
-        file_name="auto_balanced_line.csv",
-        mime="text/csv",
-    )
-
-st.markdown("---")
-st.caption(
-    "Formula basis: selected time → basic time using rating; basic time → standard time using relaxation and contingency allowances; "
-    "capacity/day uses available daily time and manpower; productivity improvement compares proposed and existing standard outputs."
-)
+    c1, c2, c3 = st.columns(3)
+    c1.download_button("📥 Download Master Excel Report", data=excel_file, file_name="WorkStudy_Optimized_Report.xlsx")
+    c2.download_button("📄 Download Proposed Line (CSV)", data=proposed_calc.to_csv(index=False).encode("utf-8"), file_name="Proposed_Calculated.csv")
+    c3.download_button("📊 Download Station Array (CSV)", data=balanced_export.to_csv(index=False).encode("utf-8"), file_name="Auto_Balanced_Line.csv")
